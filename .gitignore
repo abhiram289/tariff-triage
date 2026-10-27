@@ -1,0 +1,32 @@
+# Python
+.env
+.env.example
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+
+# Environment variables
+.env
+
+# Vector index & local cache
+data/index/
+data/cache/
+data/quarantine/
+
+# Testing & coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Observability data (local dev)
+prometheus_data/
+grafana_data/
+
+# OS specific
+.DS_Store
+Thumbs.db

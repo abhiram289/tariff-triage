@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#ffffff">
+  <title>Billing dispute triage</title>
+  <link rel="stylesheet" href="/static/redesigned_style.css">
+</head>
+<body>
+  <header class="masthead">
+    <div class="wrap">
+      <span class="wordmark">Dispute Triage</span>
+      <span class="masthead-note">Electricity billing, grievance review</span>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <div class="intro">
+      <h1>Check the tariff category on a disputed bill</h1>
+      <p>The system compares the dispute with the tariff order and supply code, then recommends what to do next. It never changes a bill. A grievance officer makes the final decision.</p>
+    </div>
+
+    <div class="layout">
+      <section class="case" aria-labelledby="case-heading">
+        <h2 id="case-heading">Dispute</h2>
+        <p class="hint">Edit the JSON, or start from a sample.</p>
+        <div class="samples" role="group" aria-label="Sample disputes">
+          <button type="button" class="sample" onclick="loadCompliantCase()">Compliant</button>
+          <button type="button" class="sample" onclick="loadViolationCase()">Violation</button>
+          <button type="button" class="sample" onclick="loadQuarantineExample()">Invalid input</button>
+        </div>
+        <label class="sr-only" for="jsonInput">Dispute JSON</label>
+        <textarea id="jsonInput" rows="14" spellcheck="false"></textarea>
+        <div class="actions">
+          <button type="button" class="primary" id="submitBtn" onclick="submitDispute()">Run triage</button>
+          <span id="status-indicator" role="status" aria-live="polite"></span>
+        </div>
+      </section>
+
+      <section class="outcome" aria-labelledby="outcome-heading" aria-live="polite">
+        <h2 id="outcome-heading">Outcome</h2>
+        <p class="hint">The bill status and the provisions behind it.</p>
+
+        <div id="emptyState" class="empty">
+          <p class="empty-title">No result yet</p>
+          <p>Choose a sample or edit the JSON, then select Run triage. A run can take up to a minute.</p>
+        </div>
+
+        <div id="results">
+          <div id="statusPanel" class="status" data-tone="review">
+            <div class="status-main">
+              <div id="statusHeadline" class="status-headline"></div>
+              <p id="statusLead" class="status-lead"></p>
+            </div>
+            <div class="status-side">
+              <span id="verifyBadge" class="verify"></span>
+              <span class="route">Route: <span id="routeVal"></span></span>
+            </div>
+          </div>
+
+          <dl class="facts">
+            <div><dt>Predicted tariff</dt><dd id="categoryVal">-</dd></div>
+          </dl>
+
+          <div id="escalationBox" class="attention" style="display:none;">
+            <h3 id="escalationTitle">Why a person needs to review this</h3>
+            <p id="escalationReason"></p>
+          </div>
+
+          <div class="block">
+            <h3>Basis</h3>
+            <p id="justificationVal" class="basis"></p>
+          </div>
+
+          <div class="block">
+            <h3 id="evidenceTitle">Provisions cited</h3>
+            <div id="citationsList" class="citations"></div>
+          </div>
+
+          <div class="trace-row">
+            <button type="button" class="trace-toggle" id="traceBtn" onclick="toggleTrace()">Show execution trace</button>
+          </div>
+          <pre id="trace-display"></pre>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <footer class="wrap page-foot">Recommendations are checked against the cited provisions. Review them before acting.</footer>
+
+  <script>
+    const sampleCompliant = {
+      "consumer_id": "BESCOM-DOM-01",
+      "connection_type": "domestic",
+      "sanctioned_load_kw": 2.5,
+      "billing_month": "2026-09",
+      "billed_category": "LT-2(a)",
+      "disputed_amount": 1500,
+      "description": "I have a domestic connection and reside in the house. I operate a single tailoring machine from one room for local neighborhood orders."
+    };
+
+    const sampleViolation = {
+      "consumer_id": "BESCOM-VIOL-02",
+      "connection_type": "domestic",
+      "sanctioned_load_kw": 12.0,
+      "billing_month": "2026-09",
+      "billed_category": "LT-2(a)",
+      "disputed_amount": 7800,
+      "description": "Domestic residential connection. Operating a commercial tailoring boutique with 6 industrial sewing machines and 4 non-resident workers."
+    };
+
+    const sampleQuarantine = {
+      "consumer_id": "BESCOM-ERR-999",
+      "connection_type": "domestic",
+      "sanctioned_load_kw": -5,
+      "billed_category": "LT-2(a)",
+      "description": "Test invalid negative load"
+    };
+
+    function loadCompliantCase() { document.getElementById("jsonInput").value = JSON.stringify(sampleCompliant, null, 2); }
+    function loadViolationCase() { document.getElementById("jsonInput").value = JSON.stringify(sampleViolation, null, 2); }
+    function loadQuarantineExample() { document.getElementById("jsonInput").value = JSON.stringify(sampleQuarantine, null, 2); }
+
+    /* Plain-language status for each routing decision. */
+    const ESCALATED = ["Needs a grievance officer", "review", "The system could not settle this from the tariff order and supply code."];
+    const STATUS = {
+      "bill-stands-with-reason": ["Bill stands", "ok", "The billed tariff category matches the stated use."],
+      "revision-recommended": ["Revision recommended", "action", "The billed category should be reviewed for revision."],
+      "site-inspection-required": ["Site inspection required", "review", "The category depends on facts only an inspection can establish."],
+      "escalate": ESCALATED,
+      "escalate-to-human": ESCALATED
+    };
+
+    function esc(v) {
+      return String(v == null ? "" : v).replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+    }
+    function pretty(s) {
+      s = String(s || "No decision").replace(/[-_]/g, " ");
+      return s.charAt(0).toUpperCase() + s.slice(1);
+    }
+    const $ = id => document.getElementById(id);
+
+    function showEmpty(title, text) {
+      $("results").style.display = "none";
+      $("trace-display").style.display = "none";
+      $("traceBtn").textContent = "Show execution trace";
+      $("emptyState").style.display = "block";
+      $("emptyState").querySelector(".empty-title").textContent = title;
+      $("emptyState").querySelector("p:last-child").textContent = text;
+    }
+
+    function showResults() {
+      $("emptyState").style.display = "none";
+      $("results").style.display = "block";
+    }
+
+    function setStatus(headline, tone, lead, verifyText, routeText) {
+      $("statusHeadline").textContent = headline;
+      $("statusPanel").setAttribute("data-tone", tone);
+      $("statusLead").textContent = lead;
+      $("verifyBadge").textContent = verifyText;
+      $("routeVal").textContent = routeText;
+    }
+
+    async function fetchFinal(url) {
+      const started = Date.now();
+      while (true) {
+        const r = await fetch(url);
+        const j = await r.json();
+        if (!j.status || !["queued", "running"].includes(j.status)) return j;
+        if (Date.now() - started > 240000) throw new Error("The run took longer than four minutes.");
+        $("status-indicator").textContent = "Run " + j.status + "...";
+        await new Promise(res => setTimeout(res, 2000));
+      }
+    }
+
+    async function submitDispute() {
+      const input = $("jsonInput").value.trim();
+      let payload = null;
+      try {
+        payload = JSON.parse(input);
+      } catch (err) {
+        alert("The JSON has a syntax error: " + err.message);
+        return;
+      }
+
+      const statusEl = $("status-indicator");
+      const btn = $("submitBtn");
+      statusEl.textContent = "Submitting...";
+      btn.disabled = true;
+      showEmpty("Running triage", "Searching the tariff order and supply code. This can take up to a minute.");
+
+      const t0 = performance.now();
+
+      try {
+        const res = await fetch("/api/v1/dispute/submit", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+
+        const elapsedSec = ((performance.now() - t0) / 1000).toFixed(2);
+
+        if (res.status === 422) {
+          renderQuarantine(await res.json(), elapsedSec);
+          return;
+        }
+        if (!res.ok) {
+          const msg = res.status === 429
+            ? "Too many requests from this client. Wait a minute, then run it again."
+            : "The server returned an error (" + res.status + "). Check the api logs.";
+          showEmpty("Request failed", msg);
+          return;
+        }
+
+        const ack = await res.json();
+        const result = await fetchFinal(ack.status_url);
+        renderResult(result, ((performance.now() - t0) / 1000).toFixed(2));
+
+      } catch (e) {
+        showEmpty("Could not complete the request", String(e));
+      } finally {
+        btn.disabled = false;
+        statusEl.textContent = "";
+      }
+    }
+
+    function renderResult(res, elapsedSec) {
+      showResults();
+      const decision = res.routing_decision;
+      const known = STATUS[decision] || [pretty(decision), "review", ""];
+      const isVerified = !!res.verification_passed;
+
+      setStatus(known[0], known[1], known[2], isVerified ? "Citations verified" : "Not verified", decision || "none");
+
+      $("categoryVal").textContent = res.predicted_tariff_category || "-";
+      $("justificationVal").textContent = res.routing_justification || "No basis was returned.";
+
+      const escBox = $("escalationBox");
+      if (decision === "escalate-to-human" || decision === "escalate" || res.human_escalation_reason) {
+        escBox.style.display = "block";
+        $("escalationTitle").textContent = "Why a person needs to review this";
+        $("escalationReason").textContent = res.human_escalation_reason || "Grievance officer review required.";
+      } else {
+        escBox.style.display = "none";
+      }
+
+      $("evidenceTitle").textContent = "Provisions cited";
+      const list = $("citationsList");
+      list.innerHTML = "";
+      if (res.citations && res.citations.length > 0) {
+        res.citations.forEach(c => {
+          const div = document.createElement("div");
+          div.className = "cite";
+          div.innerHTML =
+            '<div class="cite-ref">' + esc(c.section_or_clause) + '</div>' +
+            '<div class="cite-src">' + esc(c.document_name) + ', page ' + esc(c.page_number || "n/a") + '</div>' +
+            '<p class="cite-quote">' + esc(c.quoted_text) + '</p>';
+          list.appendChild(div);
+        });
+      } else {
+        list.innerHTML = '<div class="none">No provisions were cited.</div>';
+      }
+
+      const totalSec = res.wall_clock_latency_sec ? Number(res.wall_clock_latency_sec).toFixed(2) : elapsedSec;
+      if ($("timeVal")) $("timeVal").textContent = totalSec + " s";
+      if ($("promptVal")) $("promptVal").textContent = res.prompt_version || "v1.0.0";
+      $("trace-display").textContent = JSON.stringify(res.trace_steps || res, null, 2);
+    }
+
+    function renderQuarantine(errData, elapsedSec) {
+      showResults();
+      setStatus("Request rejected", "reject", "The request was not processed. No agent run was started.", "Validation failed", "Quarantined at intake");
+
+      $("categoryVal").textContent = "-";
+      $("justificationVal").textContent = "The request failed validation at the intake boundary and was stored in quarantine for audit.";
+
+      const escBox = $("escalationBox");
+      const qid = errData.quarantine_id || (errData.detail && errData.detail.quarantine_id);
+      if (qid) {
+        escBox.style.display = "block";
+        $("escalationTitle").textContent = "Quarantine record";
+        $("escalationReason").textContent = "Quarantine ID: " + qid;
+      } else {
+        escBox.style.display = "none";
+      }
+
+      $("evidenceTitle").textContent = "What failed validation";
+      const list = $("citationsList");
+      list.innerHTML = "";
+      const errors = errData.errors || (errData.detail && errData.detail.errors) || [];
+      if (errors.length === 0) {
+        list.innerHTML = '<div class="none">No field details were returned.</div>';
+      }
+      errors.forEach(e => {
+        const field = e.field != null ? e.field : (e.loc || []).join(".");
+        const issue = e.issue != null ? e.issue : e.msg;
+        const div = document.createElement("div");
+        div.className = "cite error";
+        div.innerHTML =
+          '<div class="cite-ref">' + esc(field || "request") + '</div>' +
+          '<p class="cite-quote">' + esc(issue) + '</p>';
+        list.appendChild(div);
+      });
+
+      if ($("timeVal")) $("timeVal").textContent = elapsedSec + " s";
+      if ($("promptVal")) $("promptVal").textContent = "Not used";
+      $("trace-display").textContent = JSON.stringify(errData, null, 2);
+    }
+
+    function toggleTrace() {
+      const box = $("trace-display");
+      const open = box.style.display === "none" || !box.style.display;
+      box.style.display = open ? "block" : "none";
+      $("traceBtn").textContent = open ? "Hide execution trace" : "Show execution trace";
+    }
+
+    loadCompliantCase();
+  </script>
+</body>
+</html>
